@@ -1,0 +1,212 @@
+{
+  "meta": {
+    "pipeline_id": "student_dropout_20260316_143022",
+    "dataset_name": "Student Dropout Prediction",
+    "dataset_source": "University Academic Records",
+    "target_variable": "Target",
+    "task_type": "binary_classification",
+    "timestamp": "2026-03-16T14:30:22Z",
+    "total_runtime_seconds": 127.5,
+    "models_evaluated": 5
+  },
+  "data_understanding": {
+    "n_rows": 3539,
+    "n_cols": 195,
+    "n_rows_after_cleaning": 3539,
+    "feature_types": {
+      "numerical": [
+        "Application_order",
+        "Previous_qualification_grade",
+        "Admission_grade",
+        "Age",
+        "Curricular_units_1st_sem_approved",
+        "Curricular_units_1st_sem_grade",
+        "Curricular_units_2nd_sem_approved",
+        "Curricular_units_2nd_sem_grade",
+        "Unemployment_rate",
+        "Inflation_rate",
+        "GDP"
+      ],
+      "categorical": [
+        "Daytime/evening_attendance",
+        "Gender",
+        "Scholarship_holder",
+        "Tuition_fees_up_to_date",
+        "Debtor"
+      ],
+      "target": "Target"
+    },
+    "class_distribution": {
+      "0_Dropout": 1421,
+      "1_Not_Dropout": 2118
+    },
+    "class_imbalance_ratio": 1.49,
+    "missing_values_summary": {},
+    "key_insights": [
+      "The dataset contains 195 features covering student background, academic performance, and financial indicators.",
+      "The target variable is binary: dropout (0) vs not dropout (1).",
+      "The class ratio is approximately 1:1.5, indicating mild imbalance.",
+      "There are no missing values, and the overall data quality is strong."
+    ]
+  },
+  "data_cleaning": {
+    "operations_performed": [
+      {
+        "operation": "standardization",
+        "detail": "All numerical features were standardized.",
+        "affected_columns": "all_numerical"
+      },
+      {
+        "operation": "encoding",
+        "detail": "Categorical variables were one-hot encoded.",
+        "affected_columns": "all_categorical"
+      }
+    ],
+    "outliers_detected": [],
+    "data_quality_score": 0.95,
+    "quality_notes": "The dataset quality is excellent and does not require additional cleaning."
+  },
+  "feature_engineering": {
+    "features_created": [],
+    "features_dropped": [],
+    "encoding_applied": {
+      "categorical_features": "one_hot_encoding",
+      "numerical_features": "standardization"
+    },
+    "feature_importances": [
+      {"feature": "Curricular_units_2nd_sem_approved", "importance": 0.18},
+      {"feature": "Curricular_units_1st_sem_approved", "importance": 0.15},
+      {"feature": "Tuition_fees_up_to_date", "importance": 0.12},
+      {"feature": "Curricular_units_2nd_sem_grade", "importance": 0.11},
+      {"feature": "Curricular_units_1st_sem_grade", "importance": 0.09},
+      {"feature": "Age", "importance": 0.08},
+      {"feature": "Debtor", "importance": 0.07},
+      {"feature": "Scholarship_holder", "importance": 0.06},
+      {"feature": "Previous_qualification_grade", "importance": 0.05},
+      {"feature": "Admission_grade", "importance": 0.04}
+    ],
+    "final_feature_count": 195,
+    "key_insights": [
+      "The number of courses passed in the second semester is the strongest predictor (18% importance).",
+      "Academic performance indicators such as grades and pass counts dominate the top five features.",
+      "Financial status, including tuition payment and debt status, is also an important factor."
+    ]
+  },
+  "modeling": {
+    "best_model": {
+      "name": "Random Forest",
+      "params": {
+        "n_estimators": 108,
+        "max_depth": 19,
+        "min_samples_split": 3,
+        "min_samples_leaf": 1,
+        "max_features": "sqrt",
+        "bootstrap": false,
+        "class_weight": "balanced_subsample"
+      },
+      "training_time_seconds": 8.7,
+      "optimization_method": "Genetic Algorithm + BayesSearchCV"
+    },
+    "models_compared": [
+      {"name": "Logistic Regression", "f1_score": 0.915, "accuracy": 0.881, "rank": 3},
+      {"name": "SVM", "f1_score": 0.911, "accuracy": 0.875, "rank": 4},
+      {"name": "Random Forest", "f1_score": 0.913, "accuracy": 0.880, "rank": 1},
+      {"name": "Decision Tree", "f1_score": 0.907, "accuracy": 0.870, "rank": 5},
+      {"name": "Deep Neural Network", "f1_score": 0.917, "accuracy": 0.890, "rank": 2}
+    ],
+    "selection_reason": "Random Forest provides the best balance across F1 score, interpretability, and training efficiency."
+  },
+  "evaluation": {
+    "primary_metric": "f1_score",
+    "primary_score": 0.913,
+    "metrics": {
+      "accuracy": 0.880,
+      "precision": 0.889,
+      "recall": 0.947,
+      "f1_score": 0.913,
+      "roc_auc": 0.926
+    },
+    "confusion_matrix": {
+      "true_positive": 569,
+      "true_negative": 210,
+      "false_positive": 74,
+      "false_negative": 32
+    },
+    "cv_scores": [0.910, 0.915, 0.912, 0.911, 0.917],
+    "cv_mean": 0.913,
+    "cv_std": 0.003,
+    "overfitting_flag": false,
+    "baseline_score": 0.598,
+    "improvement_over_baseline": 0.315,
+    "threshold_optimization": {
+      "default_threshold": 0.5,
+      "optimized_threshold": 0.53,
+      "optimization_metric": "f1_macro",
+      "improvement": 0.002
+    },
+    "performance_by_class": {
+      "class_0_dropout": {
+        "precision": 0.86,
+        "recall": 0.75,
+        "f1_score": 0.80,
+        "support": 284
+      },
+      "class_1_not_dropout": {
+        "precision": 0.89,
+        "recall": 0.94,
+        "f1_score": 0.92,
+        "support": 601
+      }
+    },
+    "key_insights": [
+      "The model performs especially well at identifying students who are not at risk of dropout (F1 = 0.92).",
+      "Recall for dropout students is 75%, meaning 25% of at-risk students may still be missed.",
+      "Overall accuracy is 88%, which is 31.5 percentage points above the random baseline.",
+      "The ROC-AUC score of 0.926 indicates strong discriminative ability."
+    ]
+  },
+  "business_context": {
+    "industry": "Higher Education",
+    "use_case": "Student dropout risk early-warning system",
+    "target_audience": "Academic administrators, student advisors, and faculty leaders",
+    "report_language": "en",
+    "report_detail_level": "executive",
+    "decision_threshold": 0.53,
+    "intervention_cost_per_student": 5000,
+    "retention_value_per_student": 50000,
+    "current_dropout_rate": 0.401,
+    "target_dropout_rate": 0.30,
+    "stakeholders": [
+      "Academic Affairs Office",
+      "Student Affairs Office",
+      "Finance Office",
+      "Faculty advisors across schools",
+      "University leadership"
+    ]
+  },
+  "risk_assessment": {
+    "model_limitations": [
+      "The model is based on historical data and may not capture sudden disruptions such as a pandemic.",
+      "Recall for dropout students is 75%, so 25% of high-risk students may still be missed.",
+      "The model does not incorporate hard-to-quantify factors such as mental health or family disruption."
+    ],
+    "ethical_considerations": [
+      "Predictions must not be used to support discriminatory decision-making.",
+      "Student privacy must be protected, and prediction results should be limited to authorized personnel.",
+      "Avoid self-fulfilling effects by not disclosing dropout risk scores directly to students."
+    ]
+  },
+  "recommendations": {
+    "immediate_actions": [
+      {
+        "priority": "High",
+        "action": "Identify students at high risk in the current semester (predicted probability > 0.7).",
+        "target_group": "Approximately 150 students",
+        "expected_impact": "If intervention is successful, around 100 students could be retained.",
+        "estimated_cost": "CNY 750,000",
+        "estimated_benefit": "CNY 5,000,000",
+        "roi": "6.67x"
+      }
+    ]
+  }
+}

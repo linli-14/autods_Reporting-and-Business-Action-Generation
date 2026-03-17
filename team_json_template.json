@@ -1,0 +1,282 @@
+{
+  "schema_version": "2.0",
+  "generated_at": "2026-03-17T10:00:00Z",
+  "project_info": {
+    "project_id": "project_001",
+    "project_name": "Customer Churn Risk Prediction",
+    "problem_type": "binary_classification",
+    "industry": "Subscription SaaS",
+    "business_objective": "Identify customers at risk of churn and prioritize retention actions",
+    "target_variable": "churn_risk",
+    "target_definition": "1 means the customer is likely to churn within the next 30 days",
+    "stakeholders": [
+      "Customer Success Team",
+      "Operations Manager",
+      "Commercial Director"
+    ],
+    "target_audience": "Customer Success Team and management",
+    "success_criteria": [
+      "High recall for high-risk customers",
+      "Clear explanation of churn drivers",
+      "Actionable intervention priorities"
+    ]
+  },
+  "dataset_summary": {
+    "dataset_name": "Customer Subscription Dataset",
+    "data_source": "Internal CRM and billing systems",
+    "num_rows": 12000,
+    "num_features": 42,
+    "num_rows_after_cleaning": 11860,
+    "feature_types": {
+      "numerical": 18,
+      "categorical": 24
+    },
+    "missing_value_summary": {
+      "total_missing": 84,
+      "missing_columns": {
+        "support_ticket_count": 19,
+        "last_payment_delay_days": 65
+      }
+    },
+    "class_distribution": {
+      "not_churn": 0.81,
+      "churn": 0.19
+    },
+    "class_imbalance_ratio": 4.26,
+    "data_quality_score": 0.93,
+    "data_quality_notes": "Minor missing values were imputed; no major data quality issues remain.",
+    "key_insights": [
+      "The dataset combines product usage, billing behavior, and support interactions.",
+      "The target class is moderately imbalanced, so recall and F1-score are important.",
+      "Customer inactivity and payment delay appear correlated with churn risk."
+    ]
+  },
+  "pipeline_trace": {
+    "data_cleaning": {
+      "performed": true,
+      "actions": [
+        "Removed duplicate customer records",
+        "Imputed missing numerical values with median",
+        "Filled missing categorical values with mode"
+      ],
+      "notes": "Cleaning completed in a single preprocessing stage."
+    },
+    "feature_engineering": {
+      "performed": true,
+      "actions": [
+        "One-hot encoded categorical features",
+        "Standardized numerical features",
+        "Created 30_day_activity_ratio and payment_delay_flag"
+      ],
+      "features_created": [
+        "30_day_activity_ratio",
+        "payment_delay_flag"
+      ],
+      "features_dropped": [
+        "raw_last_login_timestamp"
+      ],
+      "encoding_applied": {
+        "categorical_features": "one_hot_encoding",
+        "numerical_features": "standardization"
+      }
+    },
+    "model_selection": {
+      "candidate_models": [
+        "Logistic Regression",
+        "Random Forest",
+        "XGBoost"
+      ],
+      "selection_strategy": "Best F1-score on validation set with recall as secondary priority"
+    },
+    "evaluation_setup": {
+      "train_test_split": "80/20",
+      "cross_validation": "5-fold",
+      "primary_metric": "f1_score"
+    }
+  },
+  "model_results": {
+    "candidate_models": [
+      {
+        "model_name": "Logistic Regression",
+        "metrics": {
+          "accuracy": 0.84,
+          "precision": 0.76,
+          "recall": 0.79,
+          "f1_score": 0.775,
+          "roc_auc": 0.86
+        }
+      },
+      {
+        "model_name": "Random Forest",
+        "metrics": {
+          "accuracy": 0.88,
+          "precision": 0.83,
+          "recall": 0.90,
+          "f1_score": 0.862,
+          "roc_auc": 0.92
+        }
+      },
+      {
+        "model_name": "XGBoost",
+        "metrics": {
+          "accuracy": 0.89,
+          "precision": 0.85,
+          "recall": 0.91,
+          "f1_score": 0.879,
+          "roc_auc": 0.94
+        }
+      }
+    ],
+    "selected_model": {
+      "model_name": "XGBoost",
+      "selection_reason": "Best balance between recall, F1-score, and ranking performance for retention use cases.",
+      "params": {
+        "n_estimators": 300,
+        "max_depth": 5,
+        "learning_rate": 0.05
+      },
+      "training_time_seconds": 14.2,
+      "metrics": {
+        "accuracy": 0.89,
+        "precision": 0.85,
+        "recall": 0.91,
+        "f1_score": 0.879,
+        "roc_auc": 0.94
+      },
+      "confusion_matrix": {
+        "tn": 1580,
+        "fp": 96,
+        "fn": 42,
+        "tp": 282
+      },
+      "cv_scores": [
+        0.871,
+        0.879,
+        0.882,
+        0.876,
+        0.887
+      ],
+      "cv_mean": 0.879,
+      "cv_std": 0.006
+    },
+    "baseline_score": 0.5,
+    "improvement_over_baseline": 0.379,
+    "key_insights": [
+      "The selected model shows strong recall, which is valuable when missing a churn-risk customer is costly.",
+      "Performance is stable across folds, suggesting low variance.",
+      "Ranking quality is strong enough to support prioritized intervention."
+    ]
+  },
+  "interpretability": {
+    "feature_importance": [
+      {
+        "feature": "30_day_activity_ratio",
+        "importance": 0.31,
+        "direction": "lower activity increases churn risk"
+      },
+      {
+        "feature": "payment_delay_flag",
+        "importance": 0.24,
+        "direction": "payment delay increases churn risk"
+      },
+      {
+        "feature": "support_ticket_count",
+        "importance": 0.18,
+        "direction": "higher unresolved support volume increases churn risk"
+      }
+    ],
+    "local_explanations_available": true,
+    "explanation_method": "SHAP",
+    "key_insights": [
+      "Low recent product activity is the strongest churn signal.",
+      "Billing friction and unresolved support issues are major business drivers of churn."
+    ]
+  },
+  "risk_scoring": {
+    "risk_threshold": 0.7,
+    "risk_bands": {
+      "low": [
+        0.0,
+        0.39
+      ],
+      "medium": [
+        0.4,
+        0.69
+      ],
+      "high": [
+        0.7,
+        1.0
+      ]
+    },
+    "risk_summary": {
+      "total_high_risk": 240,
+      "total_medium_risk": 510,
+      "total_low_risk": 1250
+    },
+    "high_risk_instances": [
+      {
+        "case_id": "C102",
+        "predicted_probability": 0.91,
+        "predicted_label": 1,
+        "top_risk_factors": [
+          "Low 30-day activity",
+          "Repeated payment delays",
+          "Open support complaints"
+        ],
+        "suggested_action_tags": [
+          "Immediate retention outreach",
+          "Billing support follow-up",
+          "Priority account review"
+        ]
+      },
+      {
+        "case_id": "C205",
+        "predicted_probability": 0.84,
+        "predicted_label": 1,
+        "top_risk_factors": [
+          "Declining usage trend",
+          "High support burden"
+        ],
+        "suggested_action_tags": [
+          "Customer success call",
+          "Usage recovery plan"
+        ]
+      }
+    ]
+  },
+  "business_constraints": {
+    "intervention_budget": 15000,
+    "max_cases_for_immediate_intervention": 50,
+    "intervention_cost_per_case": 120,
+    "estimated_cost_of_missing_case": 900,
+    "preferred_strategy": "prioritize high recall for top-risk customers",
+    "available_interventions": [
+      {
+        "action": "Retention call",
+        "cost": 40,
+        "expected_impact": "medium"
+      },
+      {
+        "action": "Custom discount offer",
+        "cost": 120,
+        "expected_impact": "high"
+      },
+      {
+        "action": "Priority support follow-up",
+        "cost": 60,
+        "expected_impact": "medium"
+      }
+    ]
+  },
+  "reporting_preferences": {
+    "technical_report_format": "structured_markdown",
+    "business_report_format": "executive_summary",
+    "language": "en",
+    "include_visual_placeholders": true,
+    "max_business_report_length": 800,
+    "tone": {
+      "technical_report": "formal",
+      "business_report": "concise_non_technical"
+    }
+  }
+}
