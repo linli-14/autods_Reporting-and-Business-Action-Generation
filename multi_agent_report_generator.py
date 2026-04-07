@@ -76,6 +76,7 @@ class ReportGeneratorConfig:
     require_llm: bool = False
     force_template_mode: bool = False
     business_include_technical_context: bool = False
+    upstream_context: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -304,6 +305,19 @@ def load_report_planner_input(path: Union[str, os.PathLike[str]]) -> ReportPlann
     return dataclass_replace(planner_input, extra=extra)
 
 
+def load_upstream_context(path: Union[str, os.PathLike[str]]) -> Dict[str, Any]:
+    upstream_path = Path(path)
+    if not upstream_path.exists():
+        raise FileNotFoundError(f"Upstream context file not found: {upstream_path}")
+
+    with open(upstream_path, "r", encoding="utf-8") as file:
+        upstream_context = json.load(file)
+
+    if not isinstance(upstream_context, dict):
+        raise TypeError("upstream_context JSON must be an object.")
+    return upstream_context
+
+
 class MultiAgentReportGenerator:
     """Generates technical and business reports from structured JSON inputs."""
 
@@ -530,6 +544,9 @@ class MultiAgentReportGenerator:
                 + ", ".join(missing_sections)
                 + ". Upstream agents must provide the normalized report schema."
             )
+        self._validate_business_context_contract(json_data)
+        self._validate_planner_plan_contract(json_data)
+        self._validate_report_planner_contract(json_data)
 
     @classmethod
     def _has_required_sections(
@@ -563,6 +580,909 @@ class MultiAgentReportGenerator:
         if isinstance(value, list):
             return value
         return [value]
+
+    @staticmethod
+    def _coerce_dict(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
+
+    def _normalize_adaptive_adjustments(self, adjustments: Any) -> list[Dict[str, str]]:
+        normalized: list[Dict[str, str]] = []
+        for item in self._coerce_list(adjustments):
+            if isinstance(item, dict):
+                reason = self._first_non_empty(
+                    item.get("reason"),
+                    item.get("why"),
+                    item.get("context"),
+                    "Planner adjustment",
+                )
+                change = self._first_non_empty(
+                    item.get("change"),
+                    item.get("adjustment"),
+                    item.get("action"),
+                    item.get("detail"),
+                )
+                if change in (None, ""):
+                    continue
+                normalized.append(
+                    {
+                        "reason": str(reason).strip(),
+                        "change": str(change).strip(),
+                    }
+                )
+                continue
+
+            text = str(item).strip()
+            if not text:
+                continue
+            normalized.append(
+                {
+                    "reason": "Planner adjustment",
+                    "change": text,
+                }
+            )
+        return normalized
+
+    def _get_planner_review(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        business_context = self._coerce_dict(json_data.get("business_context"))
+        nested_review = self._coerce_dict(business_context.get("planner_review"))
+        top_level_review = self._coerce_dict(json_data.get("planner_review"))
+        merged = dict(nested_review)
+        merged.update(top_level_review)
+        return merged
+
+    def _get_planner_reasoning(self, json_data: Dict[str, Any]) -> Optional[str]:
+        business_context = self._coerce_dict(json_data.get("business_context"))
+        planner_plan = self._coerce_dict(json_data.get("planner_plan"))
+        replan = self._coerce_dict(planner_plan.get("replan"))
+
+        reasoning = self._first_non_empty(
+            business_context.get("planner_reasoning"),
+            replan.get("reasoning"),
+            planner_plan.get("reasoning"),
+        )
+        if reasoning in (None, ""):
+            return None
+        return str(reasoning).strip()
+
+    def _get_adaptive_adjustments(self, json_data: Dict[str, Any]) -> list[Dict[str, str]]:
+        business_context = self._coerce_dict(json_data.get("business_context"))
+        planner_plan = self._coerce_dict(json_data.get("planner_plan"))
+        replan = self._coerce_dict(planner_plan.get("replan"))
+
+        return self._normalize_adaptive_adjustments(
+            self._first_non_empty(
+                business_context.get("adaptive_adjustments"),
+                replan.get("adaptive_adjustments"),
+                replan.get("changes"),
+                planner_plan.get("adaptive_adjustments"),
+            )
+        )
+
+    def _get_constraints(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        business_context = self._coerce_dict(json_data.get("business_context"))
+        return self._coerce_dict(business_context.get("constraints"))
+
+    def _get_business_alignment(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        business_context = self._coerce_dict(json_data.get("business_context"))
+        return self._coerce_dict(business_context.get("business_alignment"))
+
+    def _get_report_planner(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        return self._coerce_dict(json_data.get("report_planner"))
+
+    def _get_planner_feature_config(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        planner_plan = self._coerce_dict(json_data.get("planner_plan"))
+        return self._coerce_dict(planner_plan.get("feature_config"))
+
+    def _get_planner_modelling_config(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        planner_plan = self._coerce_dict(json_data.get("planner_plan"))
+        return self._coerce_dict(planner_plan.get("modelling_config"))
+
+    @staticmethod
+    def _is_optional_instance(value: Any, expected_types: tuple[type, ...]) -> bool:
+        return value is None or isinstance(value, expected_types)
+
+    def _validate_string_list(self, field_name: str, value: Any) -> None:
+        if not isinstance(value, list):
+            raise TypeError(f"{field_name} must be a list of strings.")
+        if any(not isinstance(item, str) for item in value):
+            raise TypeError(f"{field_name} must contain only strings.")
+
+    def _validate_adaptive_adjustments(
+        self, field_name: str, adjustments: Any
+    ) -> None:
+        if not isinstance(adjustments, list):
+            raise TypeError(f"{field_name} must be a list.")
+        for index, item in enumerate(adjustments):
+            if not isinstance(item, dict):
+                raise TypeError(f"{field_name}[{index}] must be an object.")
+            if not isinstance(item.get("reason"), str) or not isinstance(
+                item.get("change"), str
+            ):
+                raise TypeError(
+                    f"{field_name}[{index}] must include string fields `reason` and `change`."
+                )
+
+    def _normalize_planner_review_contract(self, review: Any) -> Dict[str, Any]:
+        normalized_review = self._coerce_dict(review)
+        normalized_review["key_findings"] = [
+            str(item).strip()
+            for item in self._coerce_list(normalized_review.get("key_findings"))
+            if str(item).strip()
+        ]
+        normalized_review["recommendations"] = [
+            str(item).strip()
+            for item in self._coerce_list(normalized_review.get("recommendations"))
+            if str(item).strip()
+        ]
+        review_text = normalized_review.get("review_text")
+        normalized_review["review_text"] = (
+            str(review_text).strip() if review_text not in (None, "") else ""
+        )
+        return normalized_review
+
+    def _normalize_replan_contract(self, replan: Any) -> Dict[str, Any]:
+        normalized_replan = self._coerce_dict(replan)
+        reasoning = normalized_replan.get("reasoning")
+        normalized_replan["reasoning"] = (
+            str(reasoning).strip() if reasoning not in (None, "") else None
+        )
+        normalized_replan["adaptive_adjustments"] = (
+            self._normalize_adaptive_adjustments(
+                self._first_non_empty(
+                    normalized_replan.get("adaptive_adjustments"),
+                    normalized_replan.get("changes"),
+                    [],
+                )
+            )
+        )
+        if (
+            normalized_replan["reasoning"] is None
+            and not normalized_replan["adaptive_adjustments"]
+        ):
+            return {}
+        return normalized_replan
+
+    def _validate_business_context_contract(self, json_data: Dict[str, Any]) -> None:
+        business_context = json_data.get("business_context")
+        if not isinstance(business_context, dict):
+            raise TypeError("business_context must be an object after normalization.")
+
+        optional_string_fields = [
+            "description",
+            "raw_description",
+            "industry",
+            "use_case",
+            "target_audience",
+            "business_goal",
+            "project_objective",
+            "report_language",
+            "planner_reasoning",
+        ]
+        for field_name in optional_string_fields:
+            if not self._is_optional_instance(
+                business_context.get(field_name), (str,)
+            ):
+                raise TypeError(
+                    f"business_context.{field_name} must be a string or null."
+                )
+
+        if not isinstance(business_context.get("stakeholders"), list):
+            raise TypeError("business_context.stakeholders must be a list.")
+        if any(
+            not isinstance(item, str)
+            for item in business_context.get("stakeholders", [])
+        ):
+            raise TypeError("business_context.stakeholders must contain only strings.")
+
+        self._validate_adaptive_adjustments(
+            "business_context.adaptive_adjustments",
+            business_context.get("adaptive_adjustments"),
+        )
+
+        planner_review = business_context.get("planner_review")
+        if not isinstance(planner_review, dict):
+            raise TypeError("business_context.planner_review must be an object.")
+        self._validate_string_list(
+            "business_context.planner_review.key_findings",
+            planner_review.get("key_findings"),
+        )
+        self._validate_string_list(
+            "business_context.planner_review.recommendations",
+            planner_review.get("recommendations"),
+        )
+        if not isinstance(planner_review.get("review_text"), str):
+            raise TypeError(
+                "business_context.planner_review.review_text must be a string."
+            )
+
+        if not isinstance(business_context.get("constraints"), dict):
+            raise TypeError("business_context.constraints must be an object.")
+        if not isinstance(business_context.get("business_alignment"), dict):
+            raise TypeError("business_context.business_alignment must be an object.")
+
+    def _validate_planner_plan_contract(self, json_data: Dict[str, Any]) -> None:
+        planner_plan = json_data.get("planner_plan")
+        if planner_plan in (None, {}):
+            return
+        if not isinstance(planner_plan, dict):
+            raise TypeError("planner_plan must be an object.")
+
+        reasoning = planner_plan.get("reasoning")
+        if not self._is_optional_instance(reasoning, (str,)):
+            raise TypeError("planner_plan.reasoning must be a string or null.")
+
+        self._validate_adaptive_adjustments(
+            "planner_plan.adaptive_adjustments",
+            planner_plan.get("adaptive_adjustments", []),
+        )
+
+        feature_config = self._get_planner_feature_config(json_data)
+        modelling_config = self._get_planner_modelling_config(json_data)
+        if feature_config and not self._is_optional_instance(
+            feature_config.get("task_description"), (str,)
+        ):
+            raise TypeError(
+                "planner_plan.feature_config.task_description must be a string or null."
+            )
+        if feature_config and not self._is_optional_instance(
+            feature_config.get("use_llm_planner"), (bool,)
+        ):
+            raise TypeError(
+                "planner_plan.feature_config.use_llm_planner must be a boolean or null."
+            )
+        if modelling_config:
+            candidate_model_names = modelling_config.get("candidate_model_names", [])
+            self._validate_string_list(
+                "planner_plan.modelling_config.candidate_model_names",
+                candidate_model_names,
+            )
+            cv_folds = modelling_config.get("cv_folds")
+            if not self._is_optional_instance(cv_folds, (int,)):
+                raise TypeError(
+                    "planner_plan.modelling_config.cv_folds must be an integer or null."
+                )
+            primary_metric = modelling_config.get("primary_metric")
+            if not self._is_optional_instance(primary_metric, (str,)):
+                raise TypeError(
+                    "planner_plan.modelling_config.primary_metric must be a string or null."
+                )
+
+        replan = self._coerce_dict(planner_plan.get("replan"))
+        if replan:
+            if not self._is_optional_instance(replan.get("reasoning"), (str,)):
+                raise TypeError("planner_plan.replan.reasoning must be a string or null.")
+            self._validate_adaptive_adjustments(
+                "planner_plan.replan.adaptive_adjustments",
+                self._first_non_empty(
+                    replan.get("adaptive_adjustments"),
+                    replan.get("changes"),
+                    [],
+                ),
+            )
+
+    def _validate_report_planner_contract(self, json_data: Dict[str, Any]) -> None:
+        report_planner = json_data.get("report_planner")
+        if report_planner in (None, {}):
+            return
+        if not isinstance(report_planner, dict):
+            raise TypeError("report_planner must be an object.")
+
+        optional_string_fields = ["source", "schema_version", "rationale"]
+        for field_name in optional_string_fields:
+            if not self._is_optional_instance(report_planner.get(field_name), (str,)):
+                raise TypeError(f"report_planner.{field_name} must be a string or null.")
+
+        for field_name in [
+            "required_sections",
+            "technical_instructions",
+            "business_instructions",
+        ]:
+            value = report_planner.get(field_name, [])
+            self._validate_string_list(f"report_planner.{field_name}", value)
+
+    def _synchronize_business_context(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(json_data)
+        business_context = self._coerce_dict(normalized.get("business_context"))
+        planner_plan = self._coerce_dict(normalized.get("planner_plan"))
+        planner_review = self._normalize_planner_review_contract(
+            self._get_planner_review(normalized)
+        )
+
+        description = self._first_non_empty(
+            business_context.get("description"),
+            business_context.get("use_case"),
+            business_context.get("business_goal"),
+        )
+        if description not in (None, ""):
+            business_context["description"] = str(description).strip()
+
+        raw_description = self._first_non_empty(
+            business_context.get("raw_description"),
+            business_context.get("description"),
+        )
+        if raw_description not in (None, ""):
+            business_context["raw_description"] = str(raw_description).strip()
+
+        stakeholders = [
+            str(item).strip()
+            for item in self._coerce_list(business_context.get("stakeholders"))
+            if str(item).strip()
+        ]
+        business_context["stakeholders"] = stakeholders
+
+        planner_reasoning = self._get_planner_reasoning(
+            {
+                **normalized,
+                "business_context": business_context,
+                "planner_plan": planner_plan,
+            }
+        )
+        if planner_reasoning:
+            business_context["planner_reasoning"] = planner_reasoning
+
+        adaptive_adjustments = self._get_adaptive_adjustments(
+            {
+                **normalized,
+                "business_context": business_context,
+                "planner_plan": planner_plan,
+            }
+        )
+        business_context["adaptive_adjustments"] = adaptive_adjustments
+
+        constraints = self._get_constraints({"business_context": business_context})
+        business_context["constraints"] = constraints
+
+        business_alignment = self._get_business_alignment(
+            {"business_context": business_context}
+        )
+        business_context["business_alignment"] = business_alignment
+
+        business_context["planner_review"] = planner_review
+        normalized["planner_review"] = planner_review
+
+        default_business_context = {
+            "description": None,
+            "raw_description": None,
+            "industry": None,
+            "use_case": None,
+            "target_audience": None,
+            "stakeholders": [],
+            "business_goal": None,
+            "project_objective": None,
+            "report_language": None,
+            "planner_reasoning": None,
+            "adaptive_adjustments": [],
+            "planner_review": {
+                "key_findings": [],
+                "recommendations": [],
+                "review_text": "",
+            },
+            "constraints": {},
+            "business_alignment": {},
+        }
+        for key, default_value in default_business_context.items():
+            business_context.setdefault(key, default_value)
+
+        normalized["business_context"] = business_context
+        if planner_plan:
+            normalized["planner_plan"] = planner_plan
+        return normalized
+
+    def _synchronize_planner_contracts(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(json_data)
+
+        planner_plan = self._coerce_dict(normalized.get("planner_plan"))
+        if planner_plan:
+            feature_config = self._coerce_dict(planner_plan.get("feature_config"))
+            modelling_config = self._coerce_dict(planner_plan.get("modelling_config"))
+            if feature_config:
+                planner_plan["feature_config"] = {
+                    **feature_config,
+                    "task_description": (
+                        str(feature_config.get("task_description")).strip()
+                        if feature_config.get("task_description") not in (None, "")
+                        else None
+                    ),
+                }
+            if modelling_config:
+                candidate_model_names = [
+                    str(item).strip()
+                    for item in self._coerce_list(
+                        modelling_config.get("candidate_model_names")
+                    )
+                    if str(item).strip()
+                ]
+                planner_plan["modelling_config"] = {
+                    **modelling_config,
+                    "candidate_model_names": candidate_model_names,
+                }
+            planner_plan["adaptive_adjustments"] = self._normalize_adaptive_adjustments(
+                planner_plan.get("adaptive_adjustments")
+            )
+            replan = self._normalize_replan_contract(planner_plan.get("replan"))
+            if replan:
+                planner_plan["replan"] = replan
+                if not planner_plan["adaptive_adjustments"]:
+                    planner_plan["adaptive_adjustments"] = replan.get(
+                        "adaptive_adjustments", []
+                    )
+            elif "replan" in planner_plan:
+                planner_plan.pop("replan", None)
+            normalized["planner_plan"] = planner_plan
+
+        report_planner = self._get_report_planner(normalized)
+        if report_planner:
+            for field_name in [
+                "required_sections",
+                "technical_instructions",
+                "business_instructions",
+            ]:
+                report_planner[field_name] = [
+                    str(item).strip()
+                    for item in self._coerce_list(report_planner.get(field_name))
+                    if str(item).strip()
+                ]
+            normalized["report_planner"] = report_planner
+
+        return normalized
+
+    def _business_context_is_enriched(self, json_data: Dict[str, Any]) -> bool:
+        business_context = self._coerce_dict(json_data.get("business_context"))
+        structured_keys = [
+            "description",
+            "raw_description",
+            "planner_reasoning",
+            "adaptive_adjustments",
+            "planner_review",
+            "constraints",
+            "business_alignment",
+        ]
+        return any(
+            business_context.get(key) not in (None, "", [], {})
+            for key in structured_keys
+        )
+
+    def _summarize_adaptive_adjustments(self, adjustments: list[Dict[str, str]]) -> Optional[str]:
+        if not adjustments:
+            return None
+        return "; ".join(
+            f"{item.get('reason', 'Planner adjustment')}: {item.get('change', '')}".strip()
+            for item in adjustments
+            if item.get("change")
+        )
+
+    def _build_planning_context(self, json_data: Dict[str, Any]) -> str:
+        reasoning = self._get_planner_reasoning(json_data)
+        adaptive_adjustments = self._get_adaptive_adjustments(json_data)
+        constraints = self._get_constraints(json_data)
+        business_alignment = self._get_business_alignment(json_data)
+        feature_config = self._get_planner_feature_config(json_data)
+        modelling_config = self._get_planner_modelling_config(json_data)
+        planner_review = self._get_planner_review(json_data)
+
+        lines = [
+            self._format_optional_context("Planner reasoning", reasoning),
+            self._format_optional_context(
+                "Planner review summary", planner_review.get("review_text")
+            ),
+            self._format_optional_context(
+                "Planner key findings", planner_review.get("key_findings")
+            ),
+            self._format_optional_context(
+                "Planner recommendations", planner_review.get("recommendations")
+            ),
+            self._format_optional_context(
+                "Planner feature task", feature_config.get("task_description")
+            ),
+            self._format_optional_context(
+                "Planner feature LLM usage", feature_config.get("use_llm_planner")
+            ),
+            self._format_optional_context(
+                "Planner candidate models",
+                modelling_config.get("candidate_model_names"),
+            ),
+            self._format_optional_context(
+                "Planner CV folds", modelling_config.get("cv_folds")
+            ),
+            self._format_optional_context(
+                "Planner modelling metric", modelling_config.get("primary_metric")
+            ),
+            self._format_optional_context(
+                "Adaptive adjustments",
+                self._summarize_adaptive_adjustments(adaptive_adjustments),
+            ),
+            self._format_optional_context(
+                "Constraints",
+                self._format_value(constraints) if constraints else None,
+            ),
+            self._format_optional_context(
+                "Business alignment",
+                self._format_value(business_alignment) if business_alignment else None,
+            ),
+        ]
+        usable_lines = [line for line in lines if line]
+        if not usable_lines:
+            return "- No structured planning context was provided."
+        return "\n".join(usable_lines)
+
+    def _build_planner_feature_config_summary(self, json_data: Dict[str, Any]) -> str:
+        feature_config = self._get_planner_feature_config(json_data)
+        lines = [
+            self._format_optional_context(
+                "Task description", feature_config.get("task_description")
+            ),
+            self._format_optional_context(
+                "Use LLM planner", feature_config.get("use_llm_planner")
+            ),
+        ]
+        usable_lines = [line for line in lines if line]
+        if not usable_lines:
+            return "- No explicit planner feature configuration was provided."
+        return "\n".join(usable_lines)
+
+    def _build_planner_modelling_config_summary(self, json_data: Dict[str, Any]) -> str:
+        modelling_config = self._get_planner_modelling_config(json_data)
+        lines = [
+            self._format_optional_context(
+                "Candidate model shortlist",
+                modelling_config.get("candidate_model_names"),
+            ),
+            self._format_optional_context("CV folds", modelling_config.get("cv_folds")),
+            self._format_optional_context(
+                "Primary metric", modelling_config.get("primary_metric")
+            ),
+        ]
+        usable_lines = [line for line in lines if line]
+        if not usable_lines:
+            return "- No explicit planner modelling configuration was provided."
+        return "\n".join(usable_lines)
+
+    def _build_upstream_execution_summary(self, json_data: Dict[str, Any]) -> str:
+        upstream_context = self._get_report_upstream_context(json_data)
+        return self._build_upstream_context_block(
+            self._coerce_list(upstream_context.get("pipeline_execution_summary")),
+            "No upstream stage handoff summaries were provided.",
+        )
+
+    def _build_upstream_decision_log(self, json_data: Dict[str, Any]) -> str:
+        upstream_context = self._get_report_upstream_context(json_data)
+        return self._build_upstream_context_block(
+            self._coerce_list(upstream_context.get("key_decision_log")),
+            "No upstream stage decisions were provided.",
+        )
+
+    def _build_upstream_warning_log(self, json_data: Dict[str, Any]) -> str:
+        upstream_context = self._get_report_upstream_context(json_data)
+        return self._build_upstream_context_block(
+            self._coerce_list(upstream_context.get("risk_and_attention_items")),
+            "No upstream stage warnings were provided.",
+        )
+
+    def _build_planner_feature_config_lines(self, json_data: Dict[str, Any]) -> list[str]:
+        feature_config = self._get_planner_feature_config(json_data)
+        lines = [
+            f"Planner feature task: {self._format_value(feature_config.get('task_description'))}.",
+            f"Planner feature LLM usage: {self._format_value(feature_config.get('use_llm_planner'))}.",
+        ]
+        return lines
+
+    def _build_planner_modelling_config_lines(self, json_data: Dict[str, Any]) -> list[str]:
+        modelling_config = self._get_planner_modelling_config(json_data)
+        lines = [
+            f"Planner candidate model shortlist: {self._format_value(modelling_config.get('candidate_model_names'))}.",
+            f"Planner cross-validation folds: {self._format_value(modelling_config.get('cv_folds'))}.",
+            f"Planner modelling metric: {self._format_value(modelling_config.get('primary_metric'))}.",
+        ]
+        return lines
+
+    def _build_business_executive_summary_seed(self, json_data: Dict[str, Any]) -> str:
+        planner_review = self._get_planner_review(json_data)
+        review_text = planner_review.get("review_text")
+        if review_text in (None, ""):
+            return "- No planner review summary was provided."
+        return str(review_text).strip()
+
+    @staticmethod
+    def _normalize_stage_id(stage_id: Any) -> str:
+        if stage_id in (None, ""):
+            return ""
+        text = str(stage_id).strip().lower()
+        for prefix in ("stage_", "stage "):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+        return text
+
+    @staticmethod
+    def _normalize_stage_text_item(item: Any) -> Optional[str]:
+        if isinstance(item, dict):
+            message = (
+                item.get("decision")
+                or item.get("warning")
+                or item.get("message")
+                or item.get("summary")
+                or item.get("action")
+                or item.get("title")
+            )
+            reason = item.get("reason")
+            if message in (None, ""):
+                return None
+            if reason not in (None, ""):
+                return f"{str(message).strip()} ({str(reason).strip()})"
+            return str(message).strip()
+        text = str(item).strip()
+        return text or None
+
+    def _normalize_stage_handoff_entry(
+        self,
+        payload: Any,
+        fallback_stage_id: Optional[str] = None,
+        fallback_stage_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return None
+
+        handoff_candidate = payload.get("stage_handoff")
+        if isinstance(handoff_candidate, dict):
+            handoff = dict(handoff_candidate)
+        elif any(
+            key in payload
+            for key in (
+                "stage_id",
+                "stage_name",
+                "status",
+                "timestamp",
+                "summary",
+                "key_outputs",
+                "decisions",
+                "warnings",
+            )
+        ):
+            handoff = dict(payload)
+        else:
+            return None
+
+        handoff["stage_id"] = self._first_non_empty(
+            handoff.get("stage_id"),
+            payload.get("stage_id"),
+            fallback_stage_id,
+        )
+        handoff["stage_name"] = self._first_non_empty(
+            handoff.get("stage_name"),
+            payload.get("stage_name"),
+            fallback_stage_name,
+        )
+        summary = handoff.get("summary")
+        handoff["summary"] = str(summary).strip() if summary not in (None, "") else ""
+        handoff["key_outputs"] = self._coerce_dict(handoff.get("key_outputs"))
+        handoff["decisions"] = [
+            normalized
+            for normalized in (
+                self._normalize_stage_text_item(item)
+                for item in self._coerce_list(handoff.get("decisions"))
+            )
+            if normalized
+        ]
+        handoff["warnings"] = [
+            normalized
+            for normalized in (
+                self._normalize_stage_text_item(item)
+                for item in self._coerce_list(handoff.get("warnings"))
+            )
+            if normalized
+        ]
+        return {
+            "stage_handoff": handoff,
+            "payload": payload,
+        }
+
+    def _iter_upstream_stage_entries(self, upstream_context: Any) -> list[Dict[str, Any]]:
+        if upstream_context in (None, {}, []):
+            return []
+
+        items: list[tuple[Optional[str], Any]] = []
+        if isinstance(upstream_context, list):
+            items = [(None, item) for item in upstream_context]
+        elif isinstance(upstream_context, dict):
+            if isinstance(upstream_context.get("stages"), list):
+                items = [(None, item) for item in upstream_context.get("stages", [])]
+            elif isinstance(upstream_context.get("stages"), dict):
+                items = list(upstream_context.get("stages", {}).items())
+            elif isinstance(upstream_context.get("stage_outputs"), dict):
+                items = list(upstream_context.get("stage_outputs", {}).items())
+            elif isinstance(upstream_context.get("stage_handoffs"), list):
+                items = [
+                    (None, {"stage_handoff": item})
+                    for item in upstream_context.get("stage_handoffs", [])
+                ]
+            else:
+                items = list(upstream_context.items())
+        else:
+            return []
+
+        normalized_entries = []
+        for key, item in items:
+            fallback_stage_id = self._normalize_stage_id(key)
+            fallback_stage_name = str(key).strip() if key not in (None, "") else None
+            normalized = self._normalize_stage_handoff_entry(
+                item,
+                fallback_stage_id=fallback_stage_id or None,
+                fallback_stage_name=fallback_stage_name,
+            )
+            if normalized is not None:
+                normalized_entries.append(normalized)
+        return normalized_entries
+
+    def _stage_matches(
+        self,
+        stage_handoff: Dict[str, Any],
+        expected_stage_id: str,
+        stage_name_keywords: list[str],
+    ) -> bool:
+        normalized_stage_id = self._normalize_stage_id(stage_handoff.get("stage_id"))
+        if normalized_stage_id == expected_stage_id:
+            return True
+        stage_name = str(stage_handoff.get("stage_name", "")).strip().lower()
+        return any(keyword in stage_name for keyword in stage_name_keywords)
+
+    def _extract_stage_specific_value(
+        self, stage_entry: Dict[str, Any], key: str
+    ) -> Any:
+        payload = self._coerce_dict(stage_entry.get("payload"))
+        handoff = self._coerce_dict(stage_entry.get("stage_handoff"))
+        key_outputs = self._coerce_dict(handoff.get("key_outputs"))
+        return self._first_non_empty(
+            payload.get(key),
+            key_outputs.get(key),
+            self._coerce_dict(payload.get("result")).get(key),
+        )
+
+    def _build_report_upstream_context(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        sources = []
+        if isinstance(self.config.upstream_context, dict):
+            sources.append(self.config.upstream_context)
+        input_upstream_context = json_data.get("upstream_context")
+        if isinstance(input_upstream_context, dict):
+            sources.append(input_upstream_context)
+
+        stage_entries: list[Dict[str, Any]] = []
+        for source in sources:
+            stage_entries.extend(self._iter_upstream_stage_entries(source))
+
+        pipeline_execution_summary = []
+        key_decision_log = []
+        risk_and_attention_items = []
+        stage0_planner_reasoning = None
+        stage2_cols_dropped = None
+        stage2_rows_dropped_pct = None
+        stage5_evaluation_grade = None
+        stage5_threshold_met = None
+
+        for stage_entry in stage_entries:
+            handoff = self._coerce_dict(stage_entry.get("stage_handoff"))
+            stage_label = self._first_non_empty(
+                handoff.get("stage_name"),
+                f"Stage {handoff.get('stage_id')}"
+                if handoff.get("stage_id") not in (None, "")
+                else "Upstream stage",
+            )
+
+            summary = str(handoff.get("summary", "")).strip()
+            if summary:
+                pipeline_execution_summary.append(f"{stage_label}: {summary}")
+            key_decision_log.extend(
+                f"{stage_label}: {item}" for item in self._coerce_list(handoff.get("decisions"))
+            )
+            risk_and_attention_items.extend(
+                f"{stage_label}: {item}" for item in self._coerce_list(handoff.get("warnings"))
+            )
+
+            if self._stage_matches(handoff, "0", ["planner", "planning"]):
+                stage0_planner_reasoning = self._first_non_empty(
+                    stage0_planner_reasoning,
+                    self._extract_stage_specific_value(stage_entry, "planner_reasoning"),
+                )
+            if self._stage_matches(handoff, "2", ["cleaning", "preprocess"]):
+                stage2_cols_dropped = self._first_non_empty(
+                    stage2_cols_dropped,
+                    self._extract_stage_specific_value(stage_entry, "cols_dropped"),
+                )
+                stage2_rows_dropped_pct = self._first_non_empty(
+                    stage2_rows_dropped_pct,
+                    self._extract_stage_specific_value(stage_entry, "rows_dropped_pct"),
+                )
+            if self._stage_matches(handoff, "5", ["evaluation", "evaluate"]):
+                stage5_evaluation_grade = self._first_non_empty(
+                    stage5_evaluation_grade,
+                    self._extract_stage_specific_value(stage_entry, "evaluation_grade"),
+                )
+                stage5_threshold_met = self._first_non_empty(
+                    stage5_threshold_met,
+                    self._extract_stage_specific_value(stage_entry, "threshold_met"),
+                )
+
+        return {
+            "pipeline_execution_summary": self._deduplicate_items(
+                pipeline_execution_summary
+            ),
+            "key_decision_log": self._deduplicate_items(key_decision_log),
+            "risk_and_attention_items": self._deduplicate_items(
+                risk_and_attention_items
+            ),
+            "stage0_planner_reasoning": stage0_planner_reasoning,
+            "stage2_cols_dropped": stage2_cols_dropped,
+            "stage2_rows_dropped_pct": stage2_rows_dropped_pct,
+            "stage5_evaluation_grade": stage5_evaluation_grade,
+            "stage5_threshold_met": stage5_threshold_met,
+        }
+
+    def _absorb_upstream_context(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(json_data)
+        absorbed_context = self._build_report_upstream_context(normalized)
+        normalized["report_upstream_context"] = absorbed_context
+
+        business_context = self._coerce_dict(normalized.get("business_context"))
+        planner_reasoning = self._first_non_empty(
+            business_context.get("planner_reasoning"),
+            absorbed_context.get("stage0_planner_reasoning"),
+        )
+        if planner_reasoning not in (None, ""):
+            business_context["planner_reasoning"] = str(planner_reasoning).strip()
+
+        data_cleaning = self._coerce_dict(normalized.get("data_cleaning"))
+        cleaning_notes = []
+        if absorbed_context.get("stage2_cols_dropped") not in (None, "", [], {}):
+            cleaning_notes.append(
+                "Upstream cleaning columns dropped: "
+                + self._format_value(absorbed_context.get("stage2_cols_dropped"))
+            )
+        if absorbed_context.get("stage2_rows_dropped_pct") not in (None, "", [], {}):
+            cleaning_notes.append(
+                "Upstream cleaning rows dropped pct: "
+                + self._format_value(absorbed_context.get("stage2_rows_dropped_pct"))
+            )
+        if cleaning_notes:
+            existing_quality_notes = str(data_cleaning.get("quality_notes", "")).strip()
+            joined_notes = ". ".join(cleaning_notes) + "."
+            if existing_quality_notes:
+                data_cleaning["quality_notes"] = (
+                    existing_quality_notes.rstrip(".") + ". " + joined_notes
+                )
+            else:
+                data_cleaning["quality_notes"] = joined_notes
+            normalized["data_cleaning"] = data_cleaning
+
+        normalized["business_context"] = business_context
+        return normalized
+
+    def _get_report_upstream_context(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
+        return self._coerce_dict(json_data.get("report_upstream_context"))
+
+    def _build_upstream_context_block(
+        self, items: list[str], empty_message: str
+    ) -> str:
+        if not items:
+            return f"- {empty_message}"
+        return "\n".join(f"- {item}" for item in items)
+
+    def _build_stage5_evaluation_conclusion(self, json_data: Dict[str, Any]) -> Optional[str]:
+        upstream_context = self._get_report_upstream_context(json_data)
+        evaluation_grade = upstream_context.get("stage5_evaluation_grade")
+        threshold_met = upstream_context.get("stage5_threshold_met")
+
+        fragments = []
+        if evaluation_grade not in (None, "", [], {}):
+            fragments.append(f"evaluation grade {self._format_value(evaluation_grade)}")
+        if threshold_met not in (None, "", [], {}):
+            if isinstance(threshold_met, bool):
+                threshold_text = "met" if threshold_met else "did not meet"
+            else:
+                threshold_text = self._format_value(threshold_met)
+            fragments.append(f"threshold {threshold_text}")
+        if not fragments:
+            return None
+        return "Upstream evaluation concluded with " + " and ".join(fragments) + "."
 
     @staticmethod
     def _extract_metric_value(
@@ -778,6 +1698,13 @@ class MultiAgentReportGenerator:
                 "key_insights": self._coerce_list(model_results.get("key_insights")),
             },
             "business_context": {
+                "description": project_info.get("business_description")
+                or project_info.get("project_brief")
+                or business_goal,
+                "raw_description": project_info.get("raw_description")
+                or project_info.get("problem_statement")
+                or project_info.get("business_description")
+                or business_goal,
                 "industry": project_info.get("industry"),
                 "use_case": business_goal,
                 "target_audience": project_info.get("target_audience")
@@ -807,6 +1734,40 @@ class MultiAgentReportGenerator:
                 ),
                 "preferred_strategy": business_constraints.get("preferred_strategy"),
                 "success_criteria": success_summary,
+                "planner_reasoning": self._first_non_empty(
+                    self._coerce_dict(pipeline_trace.get("planning")).get("reasoning"),
+                    self._coerce_dict(project_info.get("planning")).get("reasoning"),
+                ),
+                "adaptive_adjustments": self._first_non_empty(
+                    self._coerce_dict(pipeline_trace.get("replan")).get(
+                        "adaptive_adjustments"
+                    ),
+                    self._coerce_dict(project_info.get("replan")).get(
+                        "adaptive_adjustments"
+                    ),
+                    [],
+                ),
+                "planner_review": self._coerce_dict(
+                    self._first_non_empty(
+                        project_info.get("planner_review"),
+                        self._coerce_dict(pipeline_trace.get("planning")).get("review"),
+                        {},
+                    )
+                ),
+                "constraints": self._coerce_dict(
+                    self._first_non_empty(
+                        project_info.get("constraints"),
+                        business_constraints.get("constraints"),
+                        {},
+                    )
+                ),
+                "business_alignment": self._coerce_dict(
+                    self._first_non_empty(
+                        project_info.get("business_alignment"),
+                        dataset_summary.get("business_alignment"),
+                        {},
+                    )
+                ),
             },
             "project_info": project_info,
             "dataset_summary": dataset_summary,
@@ -822,6 +1783,18 @@ class MultiAgentReportGenerator:
     def _normalize_input_json(self, json_data: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(json_data, dict):
             raise TypeError("Input data must be a JSON object.")
+
+        top_level_object_fields = [
+            "business_context",
+            "planner_review",
+            "planner_plan",
+            "report_planner",
+            "upstream_context",
+        ]
+        for field_name in top_level_object_fields:
+            if field_name in json_data and json_data[field_name] not in (None, {}):
+                if not isinstance(json_data[field_name], dict):
+                    raise TypeError(f"{field_name} must be a JSON object.")
 
         schema_kind = self._detect_schema_kind(json_data)
 
@@ -841,6 +1814,9 @@ class MultiAgentReportGenerator:
         if self.planner_input_ is not None:
             normalized = self.planner_input_.merge_into_json(normalized)
 
+        normalized = self._synchronize_business_context(normalized)
+        normalized = self._synchronize_planner_contracts(normalized)
+        normalized = self._absorb_upstream_context(normalized)
         self.validate_input_json(normalized)
         return normalized
 
@@ -1174,9 +2150,11 @@ class MultiAgentReportGenerator:
     def _build_project_context(self, json_data: Dict[str, Any]) -> str:
         meta = json_data.get("meta", {})
         business_context = json_data.get("business_context", {})
-        planner_review = json_data.get("planner_review", {})
-        planner_plan = json_data.get("planner_plan", {})
+        planner_review = self._get_planner_review(json_data)
         report_planner = json_data.get("report_planner", {})
+        adaptive_adjustments = self._get_adaptive_adjustments(json_data)
+        constraints = self._get_constraints(json_data)
+        business_alignment = self._get_business_alignment(json_data)
 
         context_lines = [
             self._format_optional_context("Dataset name", meta.get("dataset_name")),
@@ -1188,6 +2166,12 @@ class MultiAgentReportGenerator:
             self._format_optional_context("Project theme", meta.get("project_theme")),
             self._format_optional_context(
                 "Project description", meta.get("project_description")
+            ),
+            self._format_optional_context(
+                "Business description", business_context.get("description")
+            ),
+            self._format_optional_context(
+                "Raw user description", business_context.get("raw_description")
             ),
             self._format_optional_context("Use case", business_context.get("use_case")),
             self._format_optional_context("Industry", business_context.get("industry")),
@@ -1209,6 +2193,14 @@ class MultiAgentReportGenerator:
             self._format_optional_context(
                 "Project objective", business_context.get("project_objective")
             ),
+            self._format_optional_context(
+                "Constraints",
+                self._format_value(constraints) if constraints else None,
+            ),
+            self._format_optional_context(
+                "Business alignment",
+                self._format_value(business_alignment) if business_alignment else None,
+            ),
             self._format_optional_context("Planner source", report_planner.get("source")),
             self._format_optional_context(
                 "Planner rationale", report_planner.get("rationale")
@@ -1221,10 +2213,15 @@ class MultiAgentReportGenerator:
                 "Planner review", planner_review.get("review_text")
             ),
             self._format_optional_context(
-                "Planner primary metric", planner_plan.get("primary_metric")
+                "Planner primary metric",
+                self._coerce_dict(json_data.get("planner_plan")).get("primary_metric"),
             ),
             self._format_optional_context(
-                "Planner reasoning", planner_plan.get("reasoning")
+                "Planner reasoning", self._get_planner_reasoning(json_data)
+            ),
+            self._format_optional_context(
+                "Adaptive adjustments",
+                self._summarize_adaptive_adjustments(adaptive_adjustments),
             ),
         ]
         usable_lines = [line for line in context_lines if line]
@@ -1264,6 +2261,25 @@ class MultiAgentReportGenerator:
         return {
             "json_data": json.dumps(json_data, ensure_ascii=False, indent=2),
             "project_context": self._build_project_context(json_data),
+            "planning_context": self._build_planning_context(json_data),
+            "upstream_execution_summary": self._build_upstream_execution_summary(
+                json_data
+            ),
+            "upstream_decision_log": self._build_upstream_decision_log(json_data),
+            "upstream_warning_log": self._build_upstream_warning_log(json_data),
+            "stage5_evaluation_conclusion": self._first_non_empty(
+                self._build_stage5_evaluation_conclusion(json_data),
+                "No upstream Stage 5 evaluation conclusion was provided.",
+            ),
+            "planner_feature_config_summary": self._build_planner_feature_config_summary(
+                json_data
+            ),
+            "planner_modelling_config_summary": self._build_planner_modelling_config_summary(
+                json_data
+            ),
+            "business_executive_summary_seed": self._build_business_executive_summary_seed(
+                json_data
+            ),
             "technical_planner_instructions": self._build_planner_instruction_block(
                 json_data, "technical"
             ),
@@ -1395,7 +2411,8 @@ class MultiAgentReportGenerator:
     ) -> list[str]:
         data_understanding = json_data.get("data_understanding", {})
         evaluation = json_data.get("evaluation", {})
-        planner_review = json_data.get("planner_review", {})
+        planner_review = self._get_planner_review(json_data)
+        business_alignment = self._get_business_alignment(json_data)
         recommendations = []
 
         imbalance_ratio = data_understanding.get("class_imbalance_ratio")
@@ -1422,6 +2439,13 @@ class MultiAgentReportGenerator:
         recommendations.append(
             "Collect additional explanatory variables to improve model robustness and actionability."
         )
+        if str(business_alignment.get("data_volume_assessment", "")).strip().lower() in {
+            "marginal",
+            "insufficient",
+        }:
+            recommendations.append(
+                "Increase data volume before making strong technical performance claims because the business-alignment check flags limited data sufficiency."
+            )
         recommendations.extend(
             str(item)
             for item in self._coerce_list(planner_review.get("recommendations"))
@@ -1445,8 +2469,8 @@ class MultiAgentReportGenerator:
         return deduplicated
 
     def _build_planner_highlights(self, json_data: Dict[str, Any]) -> list[str]:
-        planner_review = json_data.get("planner_review", {})
-        planner_plan = json_data.get("planner_plan", {})
+        planner_review = self._get_planner_review(json_data)
+        planner_plan = self._coerce_dict(json_data.get("planner_plan"))
         report_planner = json_data.get("report_planner", {})
 
         highlights = [
@@ -1459,9 +2483,14 @@ class MultiAgentReportGenerator:
         if primary_metric:
             highlights.append(f"Planner primary metric: {primary_metric}.")
 
-        reasoning = planner_plan.get("reasoning")
+        reasoning = self._get_planner_reasoning(json_data)
         if reasoning:
             highlights.append(f"Planner reasoning: {reasoning}")
+
+        for adjustment in self._get_adaptive_adjustments(json_data):
+            highlights.append(
+                f"Adaptive adjustment: {adjustment.get('reason', 'Planner adjustment')} -> {adjustment.get('change', '')}"
+            )
 
         rationale = report_planner.get("rationale")
         if rationale:
@@ -1486,6 +2515,10 @@ class MultiAgentReportGenerator:
         feature_engineering = json_data.get("feature_engineering", {})
         modeling = json_data.get("modeling", {})
         evaluation = json_data.get("evaluation", {})
+        business_alignment = self._get_business_alignment(json_data)
+        planner_reasoning = self._get_planner_reasoning(json_data)
+        adaptive_adjustments = self._get_adaptive_adjustments(json_data)
+        upstream_context = self._get_report_upstream_context(json_data)
 
         dataset_name = meta.get("dataset_name", "Unknown dataset")
         target_variable = meta.get("target_variable", "unknown target")
@@ -1505,15 +2538,31 @@ class MultiAgentReportGenerator:
             self._coerce_list(feature_engineering.get("feature_importances"))
         )
         planner_highlights = self._build_planner_highlights(json_data)
+        planner_feature_lines = self._build_planner_feature_config_lines(json_data)
+        planner_model_lines = self._build_planner_modelling_config_lines(json_data)
         charts = self._build_chart_recommendations(task_type)
         recommendations = self._build_template_technical_recommendations(
             json_data, chinese=False
         )
+        upstream_execution_summary = self._coerce_list(
+            upstream_context.get("pipeline_execution_summary")
+        )
+        upstream_decision_log = self._coerce_list(
+            upstream_context.get("key_decision_log")
+        )
+        upstream_warning_log = self._coerce_list(
+            upstream_context.get("risk_and_attention_items")
+        )
+        stage2_cols_dropped = upstream_context.get("stage2_cols_dropped")
+        stage2_rows_dropped_pct = upstream_context.get("stage2_rows_dropped_pct")
+        stage5_conclusion = self._build_stage5_evaluation_conclusion(json_data)
         summary_intro = (
             "This technical report was generated with the built-in template mode. "
             f"The project analyses **{dataset_name}** for **{target_variable}** using a **{task_type}** workflow. "
             f"The selected model is **{best_model_name}**, and the primary metric **{primary_metric}** reached **{self._format_value(primary_score)}**."
         )
+        if stage5_conclusion:
+            summary_intro += " " + stage5_conclusion
         overview_lines = [
             f"Dataset size: {self._format_value(data_understanding.get('n_rows'))} rows and {self._format_value(data_understanding.get('n_cols'))} columns.",
             f"Rows after cleaning: {self._format_value(data_understanding.get('n_rows_after_cleaning'))}.",
@@ -1521,10 +2570,24 @@ class MultiAgentReportGenerator:
             f"Data quality score: {self._format_value(data_cleaning.get('data_quality_score'))}.",
             f"Quality notes: {self._format_value(data_cleaning.get('quality_notes'))}.",
         ]
+        if stage2_cols_dropped not in (None, "", [], {}):
+            overview_lines.append(
+                f"Upstream Stage 2 dropped columns: {self._format_value(stage2_cols_dropped)}."
+            )
+        if stage2_rows_dropped_pct not in (None, "", [], {}):
+            overview_lines.append(
+                f"Upstream Stage 2 rows dropped pct: {self._format_value(stage2_rows_dropped_pct)}."
+            )
+        if business_alignment:
+            overview_lines.append(
+                f"Business alignment: {self._format_value(business_alignment)}."
+            )
         feature_lines = [
             f"Features created: {self._format_value(feature_engineering.get('features_created'))}.",
             f"Features dropped: {self._format_value(feature_engineering.get('features_dropped'))}.",
             f"Encoding or transformation steps: {self._format_value(feature_engineering.get('encoding_applied'))}.",
+            "Planner feature configuration:",
+            self._markdown_bullets(planner_feature_lines),
             "Top feature signals:",
             self._markdown_bullets(
                 top_features or ["No feature-importance details were provided."]
@@ -1535,13 +2598,29 @@ class MultiAgentReportGenerator:
             f"Selection reason: {self._format_value(modeling.get('selection_reason'))}.",
             f"Optimization or selection strategy: {self._format_value(best_model.get('optimization_method'))}.",
             f"Training time (seconds): {self._format_value(best_model.get('training_time_seconds'))}.",
+            "Planner modelling configuration:",
+            self._markdown_bullets(planner_model_lines),
         ]
+        planning_lines = [
+            planner_reasoning
+            or "No explicit planner reasoning was provided for the current model and metric choices."
+        ]
+        change_log_lines = [
+            f"{item.get('reason', 'Planner adjustment')}: {item.get('change', '')}"
+            for item in adaptive_adjustments
+            if item.get("change")
+        ] or ["No adaptive adjustments were recorded."]
         performance_title = "Metric"
         performance_value = "Value"
         confusion_title = "Confusion Matrix Item"
         confusion_value = "Value"
         chart_heading = "### Recommended Visualizations"
         rec_heading = "### Improvement Recommendations"
+        planning_heading = "### Planning Rationale"
+        change_heading = "### Configuration Change Log"
+        upstream_summary_heading = "### Pipeline Execution Summary"
+        upstream_decision_heading = "### Key Decision Log"
+        upstream_warning_heading = "### Risks and Attention Items"
         section_titles = [
             "# Executive Summary",
             "## 1. Data Overview and Quality Assessment",
@@ -1581,6 +2660,33 @@ class MultiAgentReportGenerator:
             section_titles[3],
             "",
             self._markdown_bullets(model_lines),
+            "",
+            planning_heading,
+            "",
+            self._markdown_bullets(planning_lines),
+            "",
+            change_heading,
+            "",
+            self._markdown_bullets(change_log_lines),
+            "",
+            upstream_summary_heading,
+            "",
+            self._markdown_bullets(
+                upstream_execution_summary
+                or ["No upstream stage handoff summaries were provided."]
+            ),
+            "",
+            upstream_decision_heading,
+            "",
+            self._markdown_bullets(
+                upstream_decision_log or ["No upstream stage decisions were provided."]
+            ),
+            "",
+            upstream_warning_heading,
+            "",
+            self._markdown_bullets(
+                upstream_warning_log or ["No upstream stage warnings were provided."]
+            ),
             "",
             self._markdown_bullets(
                 planner_highlights
@@ -1654,6 +2760,7 @@ class MultiAgentReportGenerator:
         business_context = json_data.get("business_context", {})
         business_constraints = json_data.get("business_constraints", {})
         risk_scoring = json_data.get("risk_scoring", {})
+        planner_review = self._get_planner_review(json_data)
 
         stakeholders = self._coerce_list(business_context.get("stakeholders"))
         owner = (
@@ -1678,7 +2785,7 @@ class MultiAgentReportGenerator:
             )
         )
 
-        return [
+        rows = [
             {
                 "Priority": "High",
                 "Action": f"Launch the first intervention wave for cases above threshold {threshold} and prioritize the top {max_cases} cases.",
@@ -1696,6 +2803,23 @@ class MultiAgentReportGenerator:
                 "Required Resources": "Review workflow, outcome tracking sheet, recurring governance meeting",
             },
         ]
+        existing_actions = {row["Action"].casefold() for row in rows}
+        for recommendation in self._coerce_list(planner_review.get("recommendations")):
+            text = str(recommendation).strip()
+            if not text or text.casefold() in existing_actions:
+                continue
+            existing_actions.add(text.casefold())
+            rows.append(
+                {
+                    "Priority": "Medium",
+                    "Action": text,
+                    "Owner": owner,
+                    "Timeline": "2-4 weeks",
+                    "Expected Result": "Translate planner review guidance into an owned business follow-up.",
+                    "Required Resources": resources,
+                }
+            )
+        return rows
 
     def _build_roi_section(self, json_data: Dict[str, Any], chinese: bool) -> str:
         business_context = json_data.get("business_context", {})
@@ -1753,25 +2877,47 @@ class MultiAgentReportGenerator:
             risk_assessment.get("ethical_considerations")
         )
         notes = [str(item) for item in model_limitations + ethical_considerations]
+        business_alignment = self._get_business_alignment(json_data)
+        upstream_context = self._get_report_upstream_context(json_data)
+        upstream_warnings = [
+            str(item).strip()
+            for item in self._coerce_list(upstream_context.get("risk_and_attention_items"))
+            if str(item).strip()
+        ]
 
         if not notes:
             notes = [
                 "Monitor data quality, model drift, and operational adoption risks during rollout.",
                 "Confirm privacy, fairness, and governance controls before using predictions in production.",
             ]
-        return notes
+        if str(business_alignment.get("data_volume_assessment", "")).strip().lower() in {
+            "marginal",
+            "insufficient",
+        }:
+            notes.append(
+                "Business-alignment review flags limited data volume, so rollout decisions should include a data sufficiency checkpoint before scaling."
+            )
+        notes.extend(upstream_warnings)
+        return self._deduplicate_items(notes)
 
     def _build_implementation_roadmap(
         self, json_data: Dict[str, Any], chinese: bool
     ) -> list[str]:
         business_context = json_data.get("business_context", {})
         use_case = business_context.get("use_case", "the target use case")
+        adaptive_adjustments = self._get_adaptive_adjustments(json_data)
 
-        return [
+        roadmap = [
             f"Phase 1 (1-2 weeks): align on goals, thresholds, and review ownership for {use_case}.",
             "Phase 2 (2-4 weeks): run the first intervention pilot and capture outcome feedback.",
             "Phase 3 (ongoing): monitor performance, review ROI, and refresh the model on a regular cadence.",
         ]
+        if adaptive_adjustments:
+            roadmap.insert(
+                1,
+                "Phase 1b (immediate): translate planner-led data challenges and responses into tracked execution changes before the first business rollout.",
+            )
+        return roadmap
 
     def _build_template_business_report(
         self,
@@ -1782,17 +2928,31 @@ class MultiAgentReportGenerator:
         meta = json_data.get("meta", {})
         business_context = json_data.get("business_context", {})
         evaluation = json_data.get("evaluation", {})
+        upstream_context = self._get_report_upstream_context(json_data)
 
         dataset_name = meta.get("dataset_name", "Unknown dataset")
         use_case = business_context.get("use_case", "the target use case")
         primary_metric = evaluation.get("primary_metric", "primary metric")
         primary_score = evaluation.get("primary_score")
         decision_threshold = business_context.get("decision_threshold")
+        planner_review = self._get_planner_review(json_data)
+        constraints = self._get_constraints(json_data)
+        business_alignment = self._get_business_alignment(json_data)
+        adaptive_adjustments = self._get_adaptive_adjustments(json_data)
+        planner_feature_config = self._get_planner_feature_config(json_data)
+        planner_modelling_config = self._get_planner_modelling_config(json_data)
         action_rows = self._build_business_action_rows(json_data, chinese=False)
         risk_notes = self._build_risk_notes(json_data, chinese=False)
         roadmap = self._build_implementation_roadmap(json_data, chinese=False)
         planner_highlights = self._build_planner_highlights(json_data)
         technical_context_note = technical_report.strip() if technical_report else ""
+        upstream_execution_summary = self._coerce_list(
+            upstream_context.get("pipeline_execution_summary")
+        )
+        upstream_decision_log = self._coerce_list(
+            upstream_context.get("key_decision_log")
+        )
+        stage5_conclusion = self._build_stage5_evaluation_conclusion(json_data)
         headers = [
             "Priority",
             "Action",
@@ -1801,10 +2961,20 @@ class MultiAgentReportGenerator:
             "Expected Result",
             "Required Resources",
         ]
-        summary_intro = (
-            f"This business report translates the **{dataset_name}** model output into action for **{use_case}**. "
-            f"The primary metric **{primary_metric}** is **{self._format_value(primary_score)}**, and the recommended first-wave decisions should use threshold **{self._format_value(decision_threshold)}**."
-        )
+        review_text = str(planner_review.get("review_text", "")).strip()
+        if review_text:
+            summary_intro = review_text
+            summary_intro += (
+                f" The report applies that summary to **{use_case}**, where the primary metric **{primary_metric}** is **{self._format_value(primary_score)}**"
+                f" and the first-wave decision threshold is **{self._format_value(decision_threshold)}**."
+            )
+        else:
+            summary_intro = (
+                f"This business report translates the **{dataset_name}** model output into action for **{use_case}**. "
+                f"The primary metric **{primary_metric}** is **{self._format_value(primary_score)}**, and the recommended first-wave decisions should use threshold **{self._format_value(decision_threshold)}**."
+            )
+        if stage5_conclusion:
+            summary_intro += " " + stage5_conclusion
         if technical_context_note:
             summary_intro += " An existing technical report was used as additional context."
         section_titles = [
@@ -1821,10 +2991,28 @@ class MultiAgentReportGenerator:
             f"Primary metric {primary_metric}: {self._format_value(primary_score)}.",
             f"Decision threshold: {self._format_value(decision_threshold)}.",
             f"Preferred strategy: {self._format_value(business_context.get('preferred_strategy'))}.",
+            f"Planner candidate model shortlist: {self._format_value(planner_modelling_config.get('candidate_model_names'))}.",
+            f"Planner feature-engineering scope: {self._format_value(planner_feature_config.get('task_description'))}.",
         ]
+        if constraints.get("interpretability") is True:
+            key_findings.append(
+                "Interpretability is an explicit business constraint, so model explanations and feature logic should be reviewed before operational rollout."
+            )
+        if str(business_alignment.get("data_volume_assessment", "")).strip().lower() in {
+            "marginal",
+            "insufficient",
+        }:
+            key_findings.append(
+                "Business alignment flags limited data volume, which raises deployment risk even when current model metrics look strong."
+            )
         key_findings.extend(planner_highlights)
 
         action_table = self._build_action_table(action_rows, headers)
+        adaptive_adjustment_lines = [
+            f"{item.get('reason', 'Planner adjustment')}: {item.get('change', '')}"
+            for item in adaptive_adjustments
+            if item.get("change")
+        ]
         report_sections = [
             section_titles[0],
             "",
@@ -1833,6 +3021,19 @@ class MultiAgentReportGenerator:
             section_titles[1],
             "",
             self._markdown_bullets(key_findings),
+            "",
+            "### Pipeline Execution Summary",
+            "",
+            self._markdown_bullets(
+                upstream_execution_summary
+                or ["No upstream stage handoff summaries were provided."]
+            ),
+            "",
+            "### Key Decision Log",
+            "",
+            self._markdown_bullets(
+                upstream_decision_log or ["No upstream stage decisions were provided."]
+            ),
             "",
             section_titles[2],
             "",
@@ -1845,6 +3046,20 @@ class MultiAgentReportGenerator:
             section_titles[4],
             "",
             self._markdown_bullets(risk_notes),
+            "",
+            "### Model Interpretability"
+            if constraints.get("interpretability") is True
+            else "",
+            (
+                "The planning context marks interpretability as mandatory, so feature explanations, decision logic, and reviewer-facing evidence should be packaged with the deployment recommendation."
+            )
+            if constraints.get("interpretability") is True
+            else "",
+            "",
+            "### Data Challenges and Responses" if adaptive_adjustment_lines else "",
+            self._markdown_bullets(adaptive_adjustment_lines)
+            if adaptive_adjustment_lines
+            else "",
             "",
             section_titles[5],
             "",
@@ -2014,6 +3229,10 @@ class MultiAgentReportGenerator:
         self._announce_generation_mode()
         try:
             json_data = self._load_input_json(input_data)
+            business_context_enriched = self._business_context_is_enriched(json_data)
+            planner_review_used = bool(
+                str(self._get_planner_review(json_data).get("review_text", "")).strip()
+            )
             print("Generating technical and business reports...")
             include_technical_context = (
                 self.config.business_include_technical_context
@@ -2049,6 +3268,8 @@ class MultiAgentReportGenerator:
                 if self.planner_input_ is not None
                 else None,
                 "business_used_technical_context": include_technical_context,
+                "business_context_enriched": business_context_enriched,
+                "planner_review_used": planner_review_used,
             }
         except Exception as exc:
             return {
@@ -2063,6 +3284,8 @@ class MultiAgentReportGenerator:
                 if self.planner_input_ is not None
                 else None,
                 "business_used_technical_context": False,
+                "business_context_enriched": False,
+                "planner_review_used": False,
                 "error": str(exc),
             }
 
@@ -2074,6 +3297,10 @@ class MultiAgentReportGenerator:
         self._announce_generation_mode()
         try:
             json_data = self._load_input_json(input_data)
+            business_context_enriched = self._business_context_is_enriched(json_data)
+            planner_review_used = bool(
+                str(self._get_planner_review(json_data).get("review_text", "")).strip()
+            )
             technical_report = self._generate_technical_report_content(json_data)
             saved_paths = None
 
@@ -2092,6 +3319,8 @@ class MultiAgentReportGenerator:
                 "planner_input": asdict(self.planner_input_)
                 if self.planner_input_ is not None
                 else None,
+                "business_context_enriched": business_context_enriched,
+                "planner_review_used": planner_review_used,
             }
         except Exception as exc:
             return {
@@ -2104,6 +3333,8 @@ class MultiAgentReportGenerator:
                 "planner_input": asdict(self.planner_input_)
                 if self.planner_input_ is not None
                 else None,
+                "business_context_enriched": False,
+                "planner_review_used": False,
                 "error": str(exc),
             }
 
@@ -2117,6 +3348,10 @@ class MultiAgentReportGenerator:
         self._announce_generation_mode()
         try:
             json_data = self._load_input_json(input_data)
+            business_context_enriched = self._business_context_is_enriched(json_data)
+            planner_review_used = bool(
+                str(self._get_planner_review(json_data).get("review_text", "")).strip()
+            )
             use_technical_context = (
                 self.config.business_include_technical_context
                 if include_technical_context is None
@@ -2151,6 +3386,8 @@ class MultiAgentReportGenerator:
                 if self.planner_input_ is not None
                 else None,
                 "business_used_technical_context": use_technical_context,
+                "business_context_enriched": business_context_enriched,
+                "planner_review_used": planner_review_used,
             }
         except Exception as exc:
             return {
@@ -2164,6 +3401,8 @@ class MultiAgentReportGenerator:
                 if self.planner_input_ is not None
                 else None,
                 "business_used_technical_context": False,
+                "business_context_enriched": False,
+                "planner_review_used": False,
                 "error": str(exc),
             }
 
@@ -2174,6 +3413,27 @@ Generate a technical report based on the project context and JSON data below.
 
 [Project context]
 {project_context}
+
+[Planner feature configuration]
+{planner_feature_config_summary}
+
+[Planner modelling configuration]
+{planner_modelling_config_summary}
+
+[Planning context]
+{planning_context}
+
+[Upstream pipeline execution summary]
+{upstream_execution_summary}
+
+[Upstream decision log]
+{upstream_decision_log}
+
+[Upstream warnings]
+{upstream_warning_log}
+
+[Stage 5 evaluation conclusion]
+{stage5_evaluation_conclusion}
 
 [Planner instructions for the technical report]
 {technical_planner_instructions}
@@ -2192,6 +3452,14 @@ Generate a technical report based on the project context and JSON data below.
    - For other task types, prioritize the core metrics that actually appear in the JSON instead of forcing a fixed template.
    - Use the entity names from the JSON for the target, risk group, and business objects.
    - Follow any required sections or report-specific instructions in the planner block when they do not conflict with the actual JSON evidence.
+   - If planning context is available, include an explicit planning rationale paragraph that explains why the current task framing, metric, and model direction were chosen.
+   - If planner feature configuration or planner modelling configuration is available, refer to them explicitly instead of leaving them buried inside raw JSON.
+   - If upstream stage handoff summaries are available, synthesize them into a compact pipeline execution summary instead of ignoring the upstream work.
+   - If upstream decisions are available, include a concise key decision log that explains what was decided upstream and why it matters technically.
+   - If upstream warnings are available, surface them as technical risks or implementation cautions.
+   - If Stage 0 planner reasoning is available, use it explicitly in the planning-rationale or model-selection-rationale discussion.
+   - If Stage 2 cleaning outputs such as `cols_dropped` or `rows_dropped_pct` are available, reflect them in the data overview and cleaning discussion.
+   - If Stage 5 evaluation conclusion is available, weave it into the executive summary and final evaluation framing.
 
 1. Structure:
    - # Executive Summary
@@ -2229,6 +3497,11 @@ Generate a technical report based on the project context and JSON data below.
    - Feature engineering opportunities
    - Useful future data collection ideas
    - Monitoring and model update strategy
+   - If adaptive adjustments are provided, summarize them as a compact configuration change log with both the trigger and the resulting change.
+   - If business alignment is provided, reference it in the data overview and recommendation sections instead of ignoring it.
+   - If a candidate model shortlist is provided, explain how it framed the model-comparison scope.
+   - If feature task configuration is provided, explain how it framed the feature-engineering scope.
+   - Add a short pipeline execution summary section and a short key decision log section when upstream handoff content is available.
 
 6. Output language:
    - Write the entire report in {report_language_name}.
@@ -2253,6 +3526,30 @@ Translate the technical analysis into practical business recommendations based o
 [Planner instructions for the business report]
 {business_planner_instructions}
 
+[Planner feature configuration]
+{planner_feature_config_summary}
+
+[Planner modelling configuration]
+{planner_modelling_config_summary}
+
+[Executive summary seed]
+{business_executive_summary_seed}
+
+[Planning context]
+{planning_context}
+
+[Upstream pipeline execution summary]
+{upstream_execution_summary}
+
+[Upstream decision log]
+{upstream_decision_log}
+
+[Upstream warnings]
+{upstream_warning_log}
+
+[Stage 5 evaluation conclusion]
+{stage5_evaluation_conclusion}
+
 [Optional technical report context]
 {technical_report_context}
 
@@ -2270,6 +3567,12 @@ Translate the technical analysis into practical business recommendations based o
    - Treat the optional technical report context as supplemental input only, not as a required dependency.
    - If the optional technical report context is empty or unavailable, infer the business recommendations directly from the JSON and project context.
    - Follow any required sections or business-specific instructions in the planner block when they do not conflict with the actual JSON evidence.
+   - If the executive summary seed is available, begin the executive summary from that seed and then refine it with the concrete metrics and risks in the JSON.
+   - If planner modelling configuration defines a candidate model shortlist or metric, use that to explain governance and decision framing in business language.
+   - If upstream stage handoff summaries are available, synthesize them into a pipeline execution summary for business readers.
+   - If upstream decisions are available, translate them into a compact business decision log.
+   - If upstream warnings are available, include them in the risk notes instead of dropping them.
+   - If Stage 5 evaluation conclusion is available, use it to frame whether the overall rollout recommendation looks ready, conditional, or risky.
 
 1. Structure:
    - # Executive Summary
@@ -2307,11 +3610,17 @@ Translate the technical analysis into practical business recommendations based o
    - Timeline
    - Expected result
    - Required resources
+   - Merge planner_review recommendations with your own JSON-grounded recommendations and remove duplicates.
 
 6. Risk notes:
    - Business implications of model limitations
    - Ethics, compliance, or privacy concerns
    - Implementation challenges such as data access, manual review cost, or user adoption
+   - If `constraints.interpretability` is true, add an explicit model-interpretability paragraph.
+   - If `business_alignment.data_volume_assessment` is `marginal` or `insufficient`, add a data-quality or data-sufficiency warning.
+   - If adaptive adjustments are available, include a short "Data Challenges and Responses" subsection that translates them into business language.
+   - Add a short pipeline execution summary section when upstream handoffs are available.
+   - Add a short key decision log section when upstream decisions are available.
 
 7. Output language:
    - Write the entire report in {report_language_name}.
@@ -2394,8 +3703,19 @@ def main() -> None:
         default=None,
         help="Optional planner JSON that steers report strategy, sections, and business context.",
     )
+    parser.add_argument(
+        "--upstream-context",
+        type=str,
+        default=None,
+        help="Optional upstream stage-handoff JSON used to absorb execution summaries, decisions, and warnings from earlier stages.",
+    )
 
     args = parser.parse_args()
+    upstream_context = (
+        load_upstream_context(args.upstream_context)
+        if args.upstream_context
+        else None
+    )
 
     config = ReportGeneratorConfig(
         output_dir=args.output_dir,
@@ -2406,6 +3726,7 @@ def main() -> None:
         require_llm=args.require_llm,
         force_template_mode=args.no_llm,
         business_include_technical_context=args.business_use_technical_report,
+        upstream_context=upstream_context,
     )
     planner_input = (
         load_report_planner_input(args.planner_input)
@@ -2450,6 +3771,7 @@ if __name__ == "__main__":
 ReportGenerator = MultiAgentReportGenerator
 
 __all__ = [
+    "load_upstream_context",
     "ReportPlannerInput",
     "ReportGeneratorConfig",
     "ReportGenerator",
